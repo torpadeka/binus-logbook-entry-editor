@@ -10,15 +10,24 @@ Run:
 from __future__ import annotations
 
 import json
+import os
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from tkinter import simpledialog
 
-DEFAULT_IN_TIME = "09:00"
-DEFAULT_OUT_TIME = "05:00"
+from google import genai
+from google.genai import errors
+from dotenv import load_dotenv
+load_dotenv()
+
+DEFAULT_IN_TIME = "08:30"
+DEFAULT_OUT_TIME = "05:30"
 DEFAULT_IN_AMPM = "am"
 DEFAULT_OUT_AMPM = "pm"
 AMPM = ["am", "pm"]
+
 
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -26,9 +35,11 @@ WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 def split_time(value: str) -> tuple[str, str]:
     """'09:00 am' -> ('09:00', 'am'). Tolerant of missing/odd suffix."""
     parts = value.strip().rsplit(" ", 1)
-    if len(parts) == 2 and parts[1].lower() in AMPM:
+    if len(parts) == 2 and parts[1].lower() in AMPM and parts[0] != 'OFF':
         return parts[0], parts[1].lower()
-    return value.strip(), DEFAULT_IN_AMPM
+    else:
+        return parts[0] , None
+    # return value.strip(), DEFAULT_IN_AMPM
 
 
 def join_time(time_str: str, ampm: str) -> str:
@@ -87,11 +98,12 @@ buttons.forEach((b, i) => {{
 class Row:
     """One logbook day = one editable row of widgets."""
 
-    def __init__(self, parent: tk.Widget, index: int, app: "App") -> None:
+    def __init__(self, parent: tk.Widget, index: int, app: "App",is_sunday: bool = False) -> None:
         self.app = app
         self.index = index
         self.weekday = ""
 
+        self.is_sunday = is_sunday
         self.off_var = tk.BooleanVar(value=False)
         self.skip_var = tk.BooleanVar(value=False)
         self.in_time = tk.StringVar(value=DEFAULT_IN_TIME)
@@ -109,24 +121,30 @@ class Row:
             parent, variable=self.skip_var, command=self._on_skip
         )
 
-        self.in_frame, self.in_widgets = self._time_cell(
-            parent, self.in_time, self.in_ampm
-        )
-        self.out_frame, self.out_widgets = self._time_cell(
-            parent, self.out_time, self.out_ampm
-        )
-        self.activity_e = ttk.Entry(parent, textvariable=self.activity, width=38)
-        self.description_e = ttk.Entry(parent, textvariable=self.description, width=46)
-
         self.widgets = [
             self.day_label,
             self.off_chk,
-            self.skip_chk,
-            self.in_frame,
-            self.out_frame,
-            self.activity_e,
-            self.description_e,
         ]
+
+        if not self.is_sunday:
+            self.in_frame, self.in_widgets = self._time_cell(
+                parent, self.in_time, self.in_ampm
+            )
+            self.out_frame, self.out_widgets = self._time_cell(
+                parent, self.out_time, self.out_ampm
+            )
+            self.activity_e = ttk.Entry(parent, textvariable=self.activity, width=38)
+            self.description_e = ttk.Entry(parent, textvariable=self.description, width=46)
+
+            self.widgets = [
+                self.day_label,
+                self.off_chk,
+                self.skip_chk,
+                self.in_frame,
+                self.out_frame,
+                self.activity_e,
+                self.description_e,
+            ]
 
     @staticmethod
     def _time_cell(
@@ -147,8 +165,20 @@ class Row:
 
     def set_day_label(self, text: str) -> None:
         self.day_label.config(text=text)
+    
+    def disable_sunday(self) -> None:
+        """Lock the entire row — nothing can be clicked or edited."""
+        self.off_chk.config(state="disabled", command=lambda: None)
+        self.off_chk.bind("<Button-1>", lambda e: "break")
+        if not self.is_sunday:
+            for w in (self.activity_e, self.description_e):
+                w.config(state="disabled")
+            for w in self.in_widgets + self.out_widgets:
+                w.config(state="disabled")
 
     def _on_off(self) -> None:
+        if self.is_sunday:
+            return
         disabled = self.off_var.get()
         for w in (self.activity_e, self.description_e):
             w.config(state="disabled" if disabled else "normal")
@@ -179,18 +209,19 @@ class Row:
             self._on_off()
 
     def to_entry(self) -> dict[str, str] | None:
-        if self.skip_var.get():
-            return {"skip": True}
-        if self.off_var.get():
+        if self.is_sunday or self.off_var.get():
             return None
         return {
-            "editClockIn": join_time(self.in_time.get(), self.in_ampm.get()),
-            "editClockOut": join_time(self.out_time.get(), self.out_ampm.get()),
+            "editClockIn": join_time(self.in_time.get(), self.in_ampm.get()) if self.in_time.get() != 'OFF' else 'OFF',
+            "editClockOut": join_time(self.out_time.get(), self.out_ampm.get()) if self.out_time.get() != 'OFF' else 'OFF',
             "editActivity": self.activity.get(),
             "editDescription": self.description.get(),
         }
 
     def load(self, entry: dict[str, str] | None) -> None:
+        if self.is_sunday:
+            self.off_var.set(False)
+            return
         if entry is None:
             self.off_var.set(True)
             self.skip_var.set(False)
@@ -206,19 +237,63 @@ class Row:
         self._on_skip()
         it, ia = split_time(entry.get("editClockIn", DEFAULT_IN_TIME))
         ot, oa = split_time(entry.get("editClockOut", DEFAULT_OUT_TIME))
-        self.in_time.set(it)
-        self.in_ampm.set(ia)
+        self.in_time.set(it) 
+        self.in_ampm.set(ia) if entry.get('editClockIn') != 'OFF' and entry.get('editClockOut') != 'OFF' else ''
         self.out_time.set(ot)
-        self.out_ampm.set(oa)
+        self.out_ampm.set(oa)if entry.get('editClockIn') != 'OFF' and entry.get('editClockOut') != 'OFF' else ''
         self.activity.set(entry.get("editActivity", ""))
         self.description.set(entry.get("editDescription", ""))
 
+
+class AIHandler:
+    def __init__(self,) -> None:
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.client = None
+
+        if self.api_key:
+            self.validate_and_connect(self.api_key)
+
+    def validate_and_connect(self, key_to_test):
+        """Validates a key. Returns True if valid, False if invalid."""
+        try:
+            test_client = genai.Client(api_key=key_to_test)
+            test_client.models.list()  # Test call
+            
+            # If successful, save both key and client
+            self.api_key = key_to_test
+            self.client = test_client
+            return True
+        except errors.APIError:
+            return False
+        except Exception:
+            return False
+
+    def is_ready(self):
+        return self.client is not None
+
+    def generate_response(self, prompt):
+        """A dedicated method to handle AI generations."""
+        if not self.is_ready():
+            raise ValueError("AI Client is not initialized.")
+        
+        # Example using Gemini 2.5 Flash
+        response = self.client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config={
+                    # This forces Gemini to return raw JSON data only, stripping markdown blocks entirely
+                    "response_mime_type": "application/json"
+                }
+        )
+        return response.text
 
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("Logbook Entry Editor")
         self.rows: list[Row] = []
+        self.ai_handler = AIHandler()
+        
 
         self._build_toolbar()
         self._build_table()
@@ -329,6 +404,10 @@ class App:
     def _build_footer(self) -> None:
         bar = ttk.Frame(self.root, padding=8)
         bar.pack(fill="x")
+        ttk.Button(bar,text='Auto-fill Activities (GenAI)',command=self.gen_ai_menu).pack(
+            side="left", padx=4
+        )
+
         ttk.Button(bar, text="Load JSON…", command=self.load_json).pack(
             side="left", padx=4
         )
@@ -341,11 +420,46 @@ class App:
         ttk.Button(
             bar, text="Generate script.js + copy", command=self.generate
         ).pack(side="right", padx=4)
+    
+    def api_input_popup(self):
+        """Opens a popup dialog asking the user to manually input the API key."""
+        # simpledialog.askstring creates a quick modal popup input box
+        user_input = simpledialog.askstring(
+            "API Key Required", 
+            "Please enter your Gemini/OpenAI API Key:",
+            show="*"  # This masks the input like a password field
+        )
+        
+        if user_input:
+            return user_input.strip()
+        return None
+
+    def gen_ai_menu(self):
+        """Checks for the API key; if missing, prompts the user before proceeding."""
+        while not self.ai_handler.is_ready():
+            user_input = simpledialog.askstring(
+                "API Key Required", 
+                "Please enter your Gemini API Key:", 
+                show="*"
+            )
+            
+            if not user_input:
+                messagebox.showwarning("Cancelled", "Action aborted: Valid API Key is required.")
+                return
+
+            # Tell the AI Handler to validate this key
+            success = self.ai_handler.validate_and_connect(user_input.strip())
+            
+            if not success:
+                messagebox.showerror("Invalid Key", "The API key provided is incorrect.")
+
+        # Once valid, move on to your menu popup
+        self.open_popup()
 
     # ---- row management --------------------------------------------------
     def rebuild_rows(self) -> None:
         # preserve existing values where possible
-        old = [r.to_entry() for r in self.rows]
+        old = [r.to_entry() for r in self.rows if not r.is_sunday]
         for r in self.rows:
             for w in r.widgets:
                 w.destroy()
@@ -353,16 +467,22 @@ class App:
 
         n = max(1, self.days_var.get())
         start = WEEKDAYS.index(self.start_var.get())
+        active_idx = 0
         for i in range(n):
-            row = Row(self.grid_frame, i, self)
             wd = WEEKDAYS[(start + i) % 7]
-            row.weekday = wd
+            is_sunday = (wd == "Sun")
+            row = Row(self.grid_frame, i, self, is_sunday=is_sunday)
             row.set_day_label(f"{i + 1:>2}  {wd}")
             row.grid(i + 1)
-            if i < len(old):
-                row.load(old[i])
+            if is_sunday:
+                # Auto-mark Sundays as off days — fully locked, not editable
+                row.off_var.set(False)
+                row.disable_sunday()
+            else:
+                if active_idx < len(old):
+                    row.load(old[active_idx])
+                    active_idx += 1
             self.rows.append(row)
-        self._lock_sundays()
 
     def _lock_sundays(self) -> None:
         for row in self.rows:
@@ -410,6 +530,195 @@ class App:
     # ---- import / export -------------------------------------------------
     def collect(self) -> list[dict[str, str] | None]:
         return [r.to_entry() for r in self.rows]
+    
+    def start_autofill_thread(self):
+        """Triggers the visual loading state and starts the API work in a separate thread."""
+        # 1. Visually pack and spin the progress bar
+        self.progress.pack(fill="x", pady=(0, 10))
+        self.progress.start(10)  # Bounces back and forth every 10ms
+        
+        # 2. Disable the button so the user can't click it multiple times accidentally
+        self.autofill_button.config(state="disabled")
+
+        # 3. Create a background thread so the GUI remains active and fluid
+        threading.Thread(target=self.run_background_task, daemon=True).start()
+
+
+    def run_background_task(self):
+        """Executes the core processing workflow, cleaning up the UI when finished."""
+        try:
+            # Run your existing Gemini processing code
+            self.process_llm_payload() 
+        finally:
+            # This block ALWAYS runs, even if the API fails or errors out!
+            # 4. Stop and hide the loading state
+            self.progress.stop()
+            self.progress.pack_forget()
+            
+            # 5. Re-enable the button for future uses
+            self.autofill_button.config(state="normal")
+    
+    def open_popup(self):
+        self.selected_files = []
+
+        # 1. Create the Toplevel window
+        # 💡 Changed 'popup' to 'self.popup' so other methods can access it easily if needed
+        self.popup = tk.Toplevel(self.root)
+        self.popup.title("Auto-Fill Activities")
+        self.popup.geometry("450x480")  # Slightly increased height to accommodate the progress bar safely
+        self.popup.grab_set()
+
+        # 2. Base Layout Frame
+        frame = ttk.Frame(self.popup, padding=20)
+        frame.pack(fill="both", expand=True)
+
+        # 3. Prompt Section
+        label = ttk.Label(frame, text="Prompt:", font=("Arial", 11, "bold"))
+        label.pack(anchor="w", pady=(0, 5))
+
+        self.prompt_text = tk.Text(frame, height=5, width=50, wrap="word")
+        self.prompt_text.pack(fill="x", pady=(0, 15))
+
+        # 4. File Management Section
+        import_file_btn = ttk.Button(frame, text='Import Files', command=self.import_multiple_files)
+        import_file_btn.pack(anchor="w", pady=(0, 5))
+
+        # Heading for the selected files list
+        files_header = ttk.Label(frame, text="Selected Files:", font=("Arial", 10, "bold"))
+        files_header.pack(anchor="w", pady=(10, 2))
+
+        # This label will change dynamically when files are imported
+        self.label_imported_files = ttk.Label(frame, text="No files selected", font=("Arial", 10), justify="left", wraplength=400)
+        self.label_imported_files.pack(anchor="w", fill="x", pady=(0, 15))
+
+        # ⭐ NEW: Add the Indeterminate Progress Bar here (hidden by default)
+        self.progress = ttk.Progressbar(frame, mode='indeterminate')
+
+        # 5. Action Buttons Frame (at the very bottom)
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", side="bottom", pady=5)
+
+        # Auto-Fill Button (Left side)
+        # 💡 Pointed command to the new trigger method instead of running the payload directly
+        self.autofill_button = ttk.Button(btn_frame, text="Auto-Fill", command=self.start_autofill_thread)
+        self.autofill_button.pack(side="right", padx=5)
+
+
+    def import_multiple_files(self):
+        paths = filedialog.askopenfilenames(
+            title="Select Files",
+            filetypes=[("All Files", "*.*")]
+        )
+        
+        if not paths:
+            return  # User cancelled the dialog
+            
+        # Save full paths to the class instance so your LLM function can read the files
+        self.selected_files = list(paths)
+        
+        # Extract just the filenames (not full paths) so it looks clean in the UI
+        filenames = [os.path.basename(p) for p in self.selected_files]
+        
+        # Update the UI label to show the selected files (joined by newlines)
+        display_text = "\n".join(filenames)
+        self.label_imported_files.config(text=display_text)
+
+    def process_llm_payload(self):
+        """Method to process input payloads to be processed by LLM (Gemini)"""
+        # 1. Grab the text from the prompt box
+        current_prompt = self.prompt_text.get("1.0", "end-1c")
+        current_files = self.selected_files
+
+        # Quick validation check
+        if not current_prompt.strip() and not current_files:
+            messagebox.showwarning("Warning", "Please provide a prompt text or file to upload before running Auto-Fill.")
+            return
+        
+        # Escaped JSON layout structure so f-string doesn't throw KeyErrors
+        output_format = f'''
+            [
+                {{
+                    "editClockIn": "{DEFAULT_IN_TIME} am",
+                    "editClockOut": "{DEFAULT_OUT_TIME} pm",
+                    "editActivity": "Melakukan setup environment dan repository project",
+                    "editDescription": "Mengkloning repository dari GitLab, menginstal dependency menggunakan pip, dan memastikan aplikasi dapat berjalan di lokal tanpa error."
+                }},
+                {{
+                    "editClockIn": "{DEFAULT_IN_TIME} am",
+                    "editClockOut": "{DEFAULT_OUT_TIME} pm",
+                    "editActivity": "Slicing UI halaman login dan registrasi",
+                    "editDescription": "Mengubah desain figma menjadi komponen kode HTML/CSS dan memastikan kesesuaian tata letak serta responsivitasnya."
+                }},
+                {{
+                    "editClockIn": "OFF",
+                    "editClockOut": "OFF",
+                    "editActivity": "OFF",
+                    "editDescription": "OFF"
+                }}
+            ]
+        '''
+        
+        final_prompt = f'''
+            For context, you are given a task to fill out Activity and Description in an internship logbook.
+            Your job is to fill out these fields and stretch them out across a whole month (roughly 4 weeks / 28-31 entries).
+            
+            There will be additional context giving you the details on what the user did throughout the internship. 
+            You must expand and describe what the user possibly did based on those tasks. Extrapolate logically if details are brief to make it look professional.
+            
+            Combine the context from this baseline prompt and any files/text provided here:
+            {current_prompt}.
+
+            CRITICAL STRUCTURAL RULES:
+            1. Return the data matching this JSON array structure: {output_format}
+            2. Sunday and Saturday are non-working days, unless clearly stated to be working. For Sundays and Saturdays, set the values in the fields like the output example.
+            3. Provide enough items in the list to fully cover 4 weeks of consecutive days according to these variables:
+                a. Number of days in Month: {self.days_var.get()}
+                b. Start of day : {self.start_var.get()}
+                c. Make sure to account national Indonesian Holidays too, set it as OFF if it exists.
+        '''
+
+        try:
+            # Check if the AI handler is set up properly before making a call
+            if not self.ai_handler or not self.ai_handler.is_ready():
+                messagebox.showerror("Error", "AI Client is not connected. Please check your API configuration.")
+                return
+
+            # This list will hold the text prompt AND any uploaded file structures
+            contents_payload = []
+            
+            # 1. Handle and upload files to the File API if any are selected
+            if self.selected_files:
+                print("Uploading files to Gemini File API...")
+                for filepath in self.selected_files:
+                    uploaded_file = self.ai_handler.client.files.upload(file=filepath)
+                    contents_payload.append(uploaded_file)
+                    
+            # 2. Append the text prompt to the payload list
+            contents_payload.append(final_prompt)
+            
+            print("Sending request to Gemini...")
+            
+            # 4. Handle the API's response text (Instructing the handler to enforce raw JSON)
+            llm_output = self.ai_handler.generate_response(contents_payload,)
+
+            print('OUTPUT:', llm_output)
+            data = json.loads(llm_output)
+            
+            # Update UI components with values safely
+            self.days_var.set(len(data))
+            self.rebuild_rows()
+            
+            for row, entry in zip(self.rows, data):
+                if entry and isinstance(entry, dict):
+                    row.load(entry)
+                    
+            self._lock_sundays()
+            messagebox.showinfo("Success", "Auto-fill generation complete!")
+            
+        except json.JSONDecodeError:
+            messagebox.showerror("Parsing Error", "Gemini returned a corrupted response format. Try adjusting your prompt text or source files.")
+        except Exception as e:
+            messagebox.showerror("API Error", f"An error occurred while calling Gemini:\n{str(e)}")
 
     def load_json(self) -> None:
         path = filedialog.askopenfilename(
@@ -438,11 +747,7 @@ class App:
         messagebox.showinfo("Saved", f"Saved {path}")
 
     def generate(self) -> None:
-        # Sundays have no button on the site (auto-OFF), so drop them here to
-        # keep entries[] aligned with the buttons the page actually renders.
-        rows = [r for r in self.rows if r.weekday != "Sun"]
-        skipped_sundays = len(self.rows) - len(rows)
-        entries = [r.to_entry() for r in rows]
+        entries = [r.to_entry() for r in self.rows if not r.is_sunday]
         entries_json = json.dumps(entries, indent=4, ensure_ascii=False)
         script = SCRIPT_TEMPLATE.format(entries_json=entries_json)
 
@@ -454,10 +759,8 @@ class App:
         messagebox.showinfo(
             "Generated",
             f"Wrote {out.name} and copied script to clipboard.\n"
-            f"{len(entries)} rows ({skipped_sundays} Sundays excluded — "
-            f"no button on site).",
+            f"{len(entries)} rows.",
         )
-
 
 def main() -> None:
     root = tk.Tk()

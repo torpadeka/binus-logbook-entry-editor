@@ -2,7 +2,15 @@
 
 ## Requirements
 
-- Python 3.x (tkinter ships with the standard installer — no `pip install` needed)
+- Python 3.x (tkinter ships with the standard installer — no extra install needed for the UI itself)
+- Dependencies for the AI auto-fill feature, listed in `requirements.txt`:
+
+  ```bash
+  pip install -r requirements.txt
+  ```
+
+- A **Gemini API key** if you want to use AI-generated activities (see below). Not required
+  for manual entry — you can fill everything by hand and skip this entirely.
 
 ## 1. Run the UI
 
@@ -10,7 +18,26 @@
 python logbook_ui.py
 ```
 
-## 2. Build your entries
+## 2. (Optional) Set up your Gemini API key
+
+The AI auto-fill feature calls Google's Gemini API to generate your Activity/Description text.
+You have two ways to provide a key:
+
+- **`.env` file (recommended)** — create a `.env` file next to `logbook_ui.py`:
+
+  ```
+  GEMINI_API_KEY=your_api_key_here
+  ```
+
+  It's loaded automatically on startup.
+
+- **Manual entry** — if no key is found (or it's invalid), the app will pop up a dialog asking
+  you to paste your key the first time you open the AI auto-fill menu. The key is validated
+  live against the Gemini API before it's accepted; an invalid key re-prompts you.
+
+If you never use the AI feature, you can ignore this step entirely and just fill the table by hand.
+
+## 3. Build your entries
 
 1. **Days** — number of logbook rows. **Start weekday** — weekday of day 1.
    Click **Rebuild rows** to regenerate the table.
@@ -32,14 +59,44 @@ python logbook_ui.py
 
 > Row order must match the row order on the logbook page (top to bottom).
 
-## 3. Generate the script
+## ✨ AI Auto-Fill Activities (Gemini)
+
+Instead of typing out every Activity/Description by hand, you can have Gemini generate a
+whole month of entries for you.
+
+1. Click **Auto-fill Activities (GenAI)** in the footer.
+   - If no valid API key is configured yet, you'll be prompted for one first (see step 2 above).
+2. A popup opens with:
+   - A **Prompt** text box — describe what you actually worked on during the internship
+     (even briefly; Gemini will expand and phrase it professionally).
+   - **Import Files** — attach supporting context, such as your task list, weekly reports,
+     or any notes/screenshots. Selected files are uploaded to the Gemini File API alongside
+     your prompt so the model can use them as additional context.
+3. Click **Auto-Fill**. The request runs on a background thread (with a progress bar) so the
+   UI stays responsive.
+4. Gemini returns a structured JSON list of entries covering roughly 4 weeks (28–31 days),
+   which automatically:
+   - Populates the **Days** count and rebuilds the table to match.
+   - Fills in **Clock In / Clock Out / Activity / Description** for every working day.
+   - Marks **Saturdays and Sundays as OFF** by default (unless your prompt says otherwise).
+   - Accounts for **Indonesian national holidays**, marking those days OFF as well.
+5. Review and tweak the generated rows as needed — everything is still editable afterward,
+   and Sundays are re-locked automatically (see below).
+
+If Gemini returns a malformed response, you'll get a clear error dialog instead of a crash —
+just adjust your prompt/files and try again.
+
+> The AI only fills in text content; it never touches or submits anything on the actual
+> logbook site. You still review the result and run the generated script yourself (step 5).
+
+## 4. Generate the script
 
 Click **Generate script.js + copy**. This:
 
 - writes `script.generated.js` next to the UI, and
 - copies the full script to your clipboard.
 
-## 4. Run it on the target site
+## 5. Run it on the target site
 
 1. Open the logbook page in your browser, on the month/view that shows the rows.
 2. Open DevTools console: `F12` (or `Ctrl+Shift+J`), go to the **Console** tab.
@@ -84,6 +141,10 @@ Bundle the UI into a single executable (no Python needed to run it):
 The binary lands in `dist/` (e.g. `dist/logbook_ui.exe` on Windows). Build
 artifacts (`build/`, `dist/`, `*.spec`) are generated and safe to delete.
 
+> Note: if you use the AI auto-fill feature, make sure your `.env` file (or a manually
+> entered API key) is available alongside the built executable, since bundling does not
+> embed your API key.
+
 ## Notes
 
 - Assumes exactly one `.detailsbtn` per day, in day order. If a filled day
@@ -91,3 +152,5 @@ artifacts (`build/`, `dist/`, `*.spec`) are generated and safe to delete.
   matching day count.
 - Time values are always well-formed (`09:00 am`) because am/pm is a selector,
   not free text.
+- AI-generated text should be reviewed before submitting — treat it as a strong first draft,
+  not a guaranteed-accurate account of your work.
